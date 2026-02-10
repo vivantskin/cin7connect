@@ -30,7 +30,7 @@ WHOLESALE_SOURCES = ['backend', 'wholesale', 'b2b', 'manual']
 CONFIG_FILE = Path(".cin7connect_config.json")
 
 # Status filter: Only import these statuses
-IMPORTABLE_STATUSES = ['approved', 'voided']
+IMPORTABLE_STATUSES = ['approved', 'dispatched', 'voided']
 
 # =============================================================================
 # SESSION STATE
