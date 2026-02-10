@@ -111,7 +111,7 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) 
             "https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={
-                "where": f"createdDate >= '{start_str}' AND createdDate <= '{end_str}'",
+                "where": f"dispatchedDate >= '{start_str}' AND dispatchedDate <= '{end_str}'",
                 "page": page,
                 "rows": 250
             },
@@ -344,7 +344,8 @@ def main():
     # -------------------------------------------------------------------------
     # MAIN CONTENT
     # -------------------------------------------------------------------------
-    st.header("📅 Select Date Range")
+    st.header("📅 Select Dispatched Date Range")
+    st.caption("Fetches orders that were **dispatched** within this date range (not created date)")
     col1, col2 = st.columns(2)
     with col1:
         since_date = st.date_input("From", value=datetime.now() - timedelta(days=7))
@@ -374,7 +375,7 @@ def main():
         st.caption("👆 Select a date range and click Fetch Orders")
         return
     
-    st.caption(f"🟢 {len(orders)} orders loaded from {st.session_state.fetch_since} to {st.session_state.fetch_until}")
+    st.caption(f"🟢 {len(orders)} orders loaded (dispatched between {st.session_state.fetch_since} and {st.session_state.fetch_until})")
     
     # Filter
     to_import, to_skip, to_review = filter_orders(orders, exclude_shopify, exclude_zero)
