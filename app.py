@@ -1,17 +1,17 @@
 """
-Cin7Connect — Cin7 to HubSpot Order Sync
-========================================
+Cin7Connect — Demo Mode (Read Only)
+====================================
 - Fetches wholesale orders from Cin7
-- Matches to HubSpot contacts/companies (email first, company name fallback)
-- Push selected orders to HubSpot as Closed Won deals
-- Exceptions section for unmatched/problem orders
+- Shows what would be synced to HubSpot
+- No data is written to any system
 """
 
 import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-from thefuzz import fuzz
+import json
+from pathlib import Path
 
 # =============================================================================
 # PAGE CONFIG
@@ -27,41 +27,41 @@ st.set_page_config(
 # =============================================================================
 RETAIL_SOURCES = ['shopify retail', 'shopify', 'web', 'website', 'online', 'retail']
 WHOLESALE_SOURCES = ['backend', 'wholesale', 'b2b', 'manual']
-GENERIC_EMAIL_DOMAINS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com', 'mail.com', 'protonmail.com']
-FUZZY_MATCH_THRESHOLD = 80
+CONFIG_FILE = Path(".cin7connect_config.json")
+
+# Status filter: Only import these statuses
+IMPORTABLE_STATUSES = ['approved', 'voided']
 
 # =============================================================================
-# SESSION STATE INIT
+# SESSION STATE
 # =============================================================================
-defaults = {
-    'cin7_connected': False,
-    'hubspot_connected': False,
-    'fetched_orders': None,
-    'fetch_since': None,
-    'fetch_until': None,
-    'hubspot_companies': None,
-    'hubspot_contacts': None,
-    'matched_orders': [],
-    'exceptions': {},
-    'selected_orders': set(),
-    'push_results': None,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if 'fetched_orders' not in st.session_state:
+    st.session_state.fetched_orders = None
+if 'fetch_since' not in st.session_state:
+    st.session_state.fetch_since = None
+if 'fetch_until' not in st.session_state:
+    st.session_state.fetch_until = None
 
 # =============================================================================
-# CREDENTIALS (from Streamlit Secrets or manual input)
+# CONFIG FILE HANDLING
 # =============================================================================
-def get_credentials():
-    """Get credentials from secrets or session state."""
-    cin7_user = st.secrets.get("CIN7_USERNAME", "") if hasattr(st, 'secrets') else ""
-    cin7_key = st.secrets.get("CIN7_API_KEY", "") if hasattr(st, 'secrets') else ""
-    hubspot_key = st.secrets.get("HUBSPOT_API_KEY", "") if hasattr(st, 'secrets') else ""
-    return cin7_user, cin7_key, hubspot_key
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except:
+            return {}
+    return {}
+
+def save_config(config):
+    CONFIG_FILE.write_text(json.dumps(config))
+
+def clear_config():
+    if CONFIG_FILE.exists():
+        CONFIG_FILE.unlink()
 
 # =============================================================================
-# WHOLESALE VS RETAIL DETECTION
+# CLASSIFICATION
 # =============================================================================
 def classify_order(order: dict) -> str:
     """Classify an order as 'Wholesale' or 'Retail'."""
@@ -82,26 +82,24 @@ def classify_order(order: dict) -> str:
 # =============================================================================
 # CIN7 API
 # =============================================================================
-def test_cin7_connection(username: str, api_key: str) -> tuple:
-    """Test Cin7 connection."""
+def test_cin7(username: str, api_key: str) -> tuple:
     try:
-        response = requests.get(
+        r = requests.get(
             "https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={"rows": 1},
             timeout=30
         )
-        if response.status_code == 200:
-            return True, "✅ Connected to Cin7!"
-        elif response.status_code == 401:
-            return False, "❌ Invalid credentials"
+        if r.status_code == 200:
+            return True, "Connected"
+        elif r.status_code == 401:
+            return False, "Invalid credentials"
         else:
-            return False, f"❌ Error {response.status_code}"
+            return False, f"Error {r.status_code}"
     except Exception as e:
-        return False, f"❌ Connection error: {str(e)}"
+        return False, str(e)
 
-def fetch_cin7_orders(username: str, api_key: str, since: datetime, until: datetime) -> list:
-    """Fetch orders from Cin7."""
+def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) -> list:
     start_str = since.strftime("%Y-%m-%dT00:00:00Z")
     end_str = until.strftime("%Y-%m-%dT23:59:59Z")
     
@@ -109,7 +107,7 @@ def fetch_cin7_orders(username: str, api_key: str, since: datetime, until: datet
     page = 1
     
     while True:
-        response = requests.get(
+        r = requests.get(
             "https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={
@@ -119,9 +117,9 @@ def fetch_cin7_orders(username: str, api_key: str, since: datetime, until: datet
             },
             timeout=60
         )
-        if response.status_code != 200:
+        if r.status_code != 200:
             break
-        orders = response.json()
+        orders = r.json()
         if not orders:
             break
         all_orders.extend(orders)
@@ -129,7 +127,7 @@ def fetch_cin7_orders(username: str, api_key: str, since: datetime, until: datet
             break
         page += 1
     
-    # Classify each order
+    # Add segment classification
     for o in all_orders:
         o['_segment'] = classify_order(o)
     
@@ -138,352 +136,177 @@ def fetch_cin7_orders(username: str, api_key: str, since: datetime, until: datet
 # =============================================================================
 # HUBSPOT API
 # =============================================================================
-def test_hubspot_connection(api_key: str) -> tuple:
-    """Test HubSpot connection."""
+def test_hubspot(api_key: str) -> tuple:
     try:
-        response = requests.get(
+        r = requests.get(
             "https://api.hubapi.com/crm/v3/objects/contacts",
             headers={"Authorization": f"Bearer {api_key}"},
             params={"limit": 1},
             timeout=30
         )
-        if response.status_code == 200:
-            return True, "✅ Connected to HubSpot!"
-        elif response.status_code == 401:
-            return False, "❌ Invalid API key"
+        if r.status_code == 200:
+            return True, "Connected"
+        elif r.status_code == 401:
+            return False, "Invalid API key"
         else:
-            return False, f"❌ Error {response.status_code}"
+            return False, f"Error {r.status_code}"
     except Exception as e:
-        return False, f"❌ Connection error: {str(e)}"
-
-def fetch_hubspot_contacts(api_key: str) -> list:
-    """Fetch all contacts from HubSpot with email and company associations."""
-    all_contacts = []
-    after = None
-    
-    while True:
-        params = {
-            "limit": 100,
-            "properties": "email,firstname,lastname,company",
-        }
-        if after:
-            params["after"] = after
-        
-        response = requests.get(
-            "https://api.hubapi.com/crm/v3/objects/contacts",
-            headers={"Authorization": f"Bearer {api_key}"},
-            params=params,
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            break
-        
-        data = response.json()
-        contacts = data.get("results", [])
-        all_contacts.extend(contacts)
-        
-        paging = data.get("paging", {})
-        after = paging.get("next", {}).get("after")
-        if not after:
-            break
-    
-    return all_contacts
-
-def fetch_hubspot_companies(api_key: str) -> list:
-    """Fetch all companies from HubSpot."""
-    all_companies = []
-    after = None
-    
-    while True:
-        params = {
-            "limit": 100,
-            "properties": "name,domain",
-        }
-        if after:
-            params["after"] = after
-        
-        response = requests.get(
-            "https://api.hubapi.com/crm/v3/objects/companies",
-            headers={"Authorization": f"Bearer {api_key}"},
-            params=params,
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            break
-        
-        data = response.json()
-        companies = data.get("results", [])
-        all_companies.extend(companies)
-        
-        paging = data.get("paging", {})
-        after = paging.get("next", {}).get("after")
-        if not after:
-            break
-    
-    return all_companies
-
-def check_deal_exists(api_key: str, cin7_order_id: str) -> bool:
-    """Check if a deal with this Cin7 order ID already exists."""
-    response = requests.post(
-        "https://api.hubapi.com/crm/v3/objects/deals/search",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "filterGroups": [{
-                "filters": [{
-                    "propertyName": "cin7_order_id",
-                    "operator": "EQ",
-                    "value": cin7_order_id
-                }]
-            }],
-            "limit": 1
-        },
-        timeout=30
-    )
-    
-    if response.status_code == 200:
-        results = response.json().get("results", [])
-        return len(results) > 0
-    return False
-
-def create_hubspot_deal(api_key: str, order: dict, contact_id: str = None, company_id: str = None) -> tuple:
-    """Create a deal in HubSpot for the order."""
-    order_ref = order.get('reference', '')
-    order_total = order.get('total', 0) or 0
-    order_date = (order.get('createdDate') or '')[:10]
-    company_name = order.get('company') or order.get('billingCompany') or ''
-    
-    # Deal properties
-    deal_data = {
-        "properties": {
-            "dealname": f"{company_name} - {order_ref}",
-            "amount": str(order_total),
-            "dealstage": "closedwon",
-            "closedate": order_date,
-            "cin7_order_id": order_ref,
-            "pipeline": "default"
-        }
-    }
-    
-    # Create deal
-    response = requests.post(
-        "https://api.hubapi.com/crm/v3/objects/deals",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json=deal_data,
-        timeout=30
-    )
-    
-    if response.status_code != 201:
-        return False, f"Failed to create deal: {response.text}"
-    
-    deal_id = response.json().get("id")
-    
-    # Associate with contact
-    if contact_id:
-        requests.put(
-            f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/contacts/{contact_id}/deal_to_contact",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30
-        )
-    
-    # Associate with company
-    if company_id:
-        requests.put(
-            f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/companies/{company_id}/deal_to_company",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30
-        )
-    
-    return True, deal_id
+        return False, str(e)
 
 # =============================================================================
-# MATCHING LOGIC
+# FILTER ORDERS
 # =============================================================================
-def get_email_domain(email: str) -> str:
-    """Extract domain from email."""
-    if not email or '@' not in email:
-        return ''
-    return email.split('@')[1].lower()
-
-def match_order_to_hubspot(order: dict, contacts: list, companies: list) -> dict:
+def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tuple:
     """
-    Match a Cin7 order to HubSpot contact/company.
-    Returns: {matched: bool, contact_id, company_id, match_type, exception_type, exception_reason}
+    Filter orders into: to_import, to_skip, to_review
+    Now includes status filter: only Approved and Voided are importable
     """
-    order_email = (order.get('email') or order.get('memberEmail') or '').strip().lower()
-    order_company = (order.get('company') or order.get('billingCompany') or '').strip()
-    order_ref = order.get('reference', '')
+    to_import = []
+    to_skip = []
+    to_review = []
     
-    result = {
-        'matched': False,
-        'contact_id': None,
-        'company_id': None,
-        'match_type': None,
-        'exception_type': None,
-        'exception_reason': None,
-    }
-    
-    # Check for missing email
-    if not order_email:
-        result['exception_type'] = 'missing_email_cin7'
-        result['exception_reason'] = 'Order has no email address in Cin7'
-        return result
-    
-    # Check for generic email
-    email_domain = get_email_domain(order_email)
-    if email_domain in GENERIC_EMAIL_DOMAINS and not order_company:
-        result['exception_type'] = 'generic_email'
-        result['exception_reason'] = f'Generic email ({email_domain}) with no company name'
-        return result
-    
-    # STEP 1: Try exact email match
-    for contact in contacts:
-        contact_email = (contact.get('properties', {}).get('email') or '').lower()
-        if contact_email == order_email:
-            result['matched'] = True
-            result['contact_id'] = contact.get('id')
-            result['match_type'] = 'email_exact'
-            # Try to find associated company
-            for company in companies:
-                company_domain = (company.get('properties', {}).get('domain') or '').lower()
-                if company_domain and company_domain == email_domain:
-                    result['company_id'] = company.get('id')
-                    break
-            return result
-    
-    # STEP 2: Try fuzzy company name match
-    if order_company:
-        best_match = None
-        best_score = 0
+    for o in orders:
+        source = (o.get('source') or '').lower()
+        total = o.get('total', 0) or 0
+        segment = o.get('_segment', 'Retail')
+        status = (o.get('stage') or o.get('status') or '').lower()
         
-        for company in companies:
-            company_name = company.get('properties', {}).get('name') or ''
-            if not company_name:
-                continue
-            
-            score = fuzz.ratio(order_company.lower(), company_name.lower())
-            if score > best_score:
-                best_score = score
-                best_match = company
+        # Skip retail
+        if segment == 'Retail':
+            to_skip.append(o)
+            continue
         
-        if best_score >= FUZZY_MATCH_THRESHOLD:
-            result['matched'] = True
-            result['company_id'] = best_match.get('id')
-            result['match_type'] = f'company_fuzzy_{best_score}%'
-            return result
-        elif best_score >= 60:
-            # Ambiguous match
-            result['exception_type'] = 'ambiguous_match'
-            result['exception_reason'] = f'Best company match "{best_match.get("properties", {}).get("name")}" scored {best_score}% (threshold: {FUZZY_MATCH_THRESHOLD}%)'
-            return result
+        # Skip excluded sources
+        if exclude_shopify and 'shopify retail' in source:
+            to_skip.append(o)
+            continue
+        
+        # Check status - only import Approved and Voided
+        if status not in IMPORTABLE_STATUSES:
+            to_skip.append(o)
+            continue
+        
+        # Handle $0 orders
+        if total == 0:
+            if exclude_zero:
+                to_skip.append(o)
+            else:
+                to_review.append(o)
+            continue
+        
+        to_import.append(o)
     
-    # No match found
-    result['exception_type'] = 'no_match'
-    result['exception_reason'] = f'Email "{order_email}" not found, company "{order_company}" did not match'
-    return result
+    return to_import, to_skip, to_review
 
 # =============================================================================
 # DISPLAY HELPERS
 # =============================================================================
-def order_to_display(order: dict, match_result: dict = None) -> dict:
-    """Convert order to display format."""
+def order_to_summary(order: dict) -> dict:
+    """Convert order to display format with raw numbers for proper sorting."""
     total = order.get('total', 0) or 0
-    display = {
+    return {
         'Order #': order.get('reference', ''),
-        'Company': order.get('company') or order.get('billingCompany') or '',
-        'Email': order.get('email') or order.get('memberEmail') or '',
-        'Total': total,
-        'Date': (order.get('createdDate') or '')[:10],
         'Source': order.get('source', ''),
+        'Segment': order.get('_segment', ''),
+        'Total': float(total),  # Raw number for sorting
+        'Company': order.get('company') or order.get('billingCompany') or '',
+        'Customer': order.get('customerName') or order.get('contactName') or '',
+        'Email': order.get('email') or order.get('memberEmail') or '',
+        'Date': (order.get('createdDate') or '')[:10],
+        'Status': order.get('stage') or order.get('status') or '',
     }
-    if match_result:
-        display['Match Type'] = match_result.get('match_type') or 'N/A'
-    return display
+
+def get_column_config():
+    """Column configuration for currency formatting."""
+    return {
+        'Total': st.column_config.NumberColumn(
+            'Total',
+            format='$%.2f'
+        )
+    }
 
 # =============================================================================
 # MAIN APP
 # =============================================================================
 def main():
     st.title("🔄 Cin7Connect")
-    st.markdown("**Cin7 → HubSpot Order Sync**")
+    st.subheader("🎭 DEMO MODE - Read Only")
+    st.info("This demo connects to real APIs but **never writes any data**. Safe to use with production systems.")
     
-    st.divider()
-    
-    # =========================================================================
+    # -------------------------------------------------------------------------
     # SIDEBAR
-    # =========================================================================
+    # -------------------------------------------------------------------------
     with st.sidebar:
-        st.header("🔌 Connections")
+        config = load_config()
         
-        # Get any secrets
-        secret_cin7_user, secret_cin7_key, secret_hubspot_key = get_credentials()
+        st.header("🔌 Connections")
         
         # Cin7
         st.subheader("Cin7 Omni")
-        cin7_user = st.text_input("Username", value=secret_cin7_user, key="cin7_user_input")
-        cin7_key = st.text_input("API Key", type="password", value=secret_cin7_key, key="cin7_key_input")
+        cin7_user = st.text_input("Username", value=config.get('cin7_username', ''))
+        cin7_key = st.text_input("API Key", type="password", value=config.get('cin7_api_key', ''))
         
-        if st.button("Test Cin7", use_container_width=True):
+        if st.button("Test Cin7"):
             if cin7_user and cin7_key:
-                success, message = test_cin7_connection(cin7_user, cin7_key)
-                if success:
-                    st.session_state.cin7_connected = True
-                    st.success(message)
+                ok, msg = test_cin7(cin7_user, cin7_key)
+                if ok:
+                    st.success(f"✅ {msg}")
                 else:
-                    st.session_state.cin7_connected = False
-                    st.error(message)
+                    st.error(f"❌ {msg}")
             else:
-                st.error("Enter username and API key")
+                st.error("Enter credentials")
         
-        st.caption(f"Status: {'✅ Connected' if st.session_state.cin7_connected else '❌ Not connected'}")
+        cin7_ok, _ = test_cin7(cin7_user, cin7_key) if cin7_user and cin7_key else (False, "")
+        st.caption(f"Status: {'✅ Connected' if cin7_ok else '❌ Not connected'}")
         
         st.divider()
         
         # HubSpot
         st.subheader("HubSpot")
-        hubspot_key = st.text_input("Private App Token", type="password", value=secret_hubspot_key, key="hubspot_key_input")
+        hs_key = st.text_input("Private App Token", type="password", value=config.get('hubspot_api_key', ''))
         
-        if st.button("Test HubSpot", use_container_width=True):
-            if hubspot_key:
-                success, message = test_hubspot_connection(hubspot_key)
-                if success:
-                    st.session_state.hubspot_connected = True
-                    st.success(message)
+        if st.button("Test HubSpot"):
+            if hs_key:
+                ok, msg = test_hubspot(hs_key)
+                if ok:
+                    st.success(f"✅ {msg}")
                 else:
-                    st.session_state.hubspot_connected = False
-                    st.error(message)
+                    st.error(f"❌ {msg}")
             else:
                 st.error("Enter API key")
         
-        st.caption(f"Status: {'✅ Connected' if st.session_state.hubspot_connected else '❌ Not connected'}")
+        hs_ok, _ = test_hubspot(hs_key) if hs_key else (False, "")
+        st.caption(f"Status: {'✅ Connected' if hs_ok else '❌ Not connected'}")
         
         st.divider()
         
         # Filters
-        st.subheader("⚙️ Filters")
-        exclude_zero = st.checkbox("Exclude $0.00 orders", value=True)
+        st.header("⚙️ Filters")
+        exclude_shopify = st.checkbox("Exclude 'Shopify Retail'", value=True)
+        exclude_zero = st.checkbox("Exclude $0.00 orders", value=False, help="$0 orders go to 'Needs Review' if unchecked")
         
         st.divider()
-        st.caption("🔒 Credentials are not stored")
+        
+        # Remember credentials
+        remember = st.checkbox("🔑 Remember credentials", value=config.get('remember', False), help="Save credentials locally")
+        if remember:
+            save_config({
+                'cin7_username': cin7_user,
+                'cin7_api_key': cin7_key,
+                'hubspot_api_key': hs_key,
+                'remember': True
+            })
+            st.caption("✅ Credentials saved locally")
+        else:
+            if config.get('remember'):
+                clear_config()
+        
+        st.caption("🔒 Demo mode - no data will be written")
     
-    # =========================================================================
-    # MAIN CONTENT - NOT CONNECTED
-    # =========================================================================
-    if not st.session_state.cin7_connected or not st.session_state.hubspot_connected:
-        st.warning("👈 Connect to both Cin7 and HubSpot using the sidebar")
-        return
-    
-    # =========================================================================
-    # DATE RANGE + FETCH
-    # =========================================================================
-    st.subheader("📅 Select Date Range")
+    # -------------------------------------------------------------------------
+    # MAIN CONTENT
+    # -------------------------------------------------------------------------
+    st.header("📅 Select Date Range")
     col1, col2 = st.columns(2)
     with col1:
         since_date = st.date_input("From", value=datetime.now() - timedelta(days=7))
@@ -494,311 +317,215 @@ def main():
     until = datetime.combine(until_date, datetime.max.time())
     
     # Fetch button
-    if st.button("🔍 Fetch Orders & Match to HubSpot", use_container_width=True, type="primary"):
-        
-        # Fetch orders
-        with st.spinner("Fetching orders from Cin7..."):
-            orders = fetch_cin7_orders(cin7_user, cin7_key, since, until)
-        
-        if not orders:
-            st.warning("No orders found in this date range")
-            return
-        
-        # Filter for wholesale only
-        wholesale_orders = [o for o in orders if o.get('_segment') == 'Wholesale']
-        retail_orders = [o for o in orders if o.get('_segment') == 'Retail']
-        
-        # Exclude $0 if checked
-        if exclude_zero:
-            wholesale_orders = [o for o in wholesale_orders if (o.get('total') or 0) > 0]
-        
-        st.session_state.fetched_orders = orders
-        st.session_state.fetch_since = since_date
-        st.session_state.fetch_until = until_date
-        
-        # Fetch HubSpot data
-        with st.spinner("Fetching contacts from HubSpot..."):
-            contacts = fetch_hubspot_contacts(hubspot_key)
-            st.session_state.hubspot_contacts = contacts
-        
-        with st.spinner("Fetching companies from HubSpot..."):
-            companies = fetch_hubspot_companies(hubspot_key)
-            st.session_state.hubspot_companies = companies
-        
-        # Match orders
-        with st.spinner("Matching orders to HubSpot..."):
-            matched = []
-            exceptions = {
-                'no_match': [],
-                'ambiguous_match': [],
-                'generic_email': [],
-                'missing_email_cin7': [],
-                'duplicate': [],
-            }
-            
-            for order in wholesale_orders:
-                order_ref = order.get('reference', '')
-                
-                # Check for duplicate
-                if check_deal_exists(hubspot_key, order_ref):
-                    exceptions['duplicate'].append({
-                        'order': order,
-                        'reason': f'Order {order_ref} already exists in HubSpot'
-                    })
-                    continue
-                
-                # Try to match
-                match_result = match_order_to_hubspot(order, contacts, companies)
-                
-                if match_result['matched']:
-                    matched.append({
-                        'order': order,
-                        'match': match_result
-                    })
-                else:
-                    exc_type = match_result.get('exception_type', 'no_match')
-                    exceptions[exc_type].append({
-                        'order': order,
-                        'reason': match_result.get('exception_reason', 'Unknown')
-                    })
-            
-            st.session_state.matched_orders = matched
-            st.session_state.exceptions = exceptions
-            st.session_state.selected_orders = set(range(len(matched)))  # Select all by default
-        
-        st.success(f"Fetched {len(orders)} orders, {len(wholesale_orders)} wholesale, {len(matched)} matched!")
+    if st.button("🔄 Fetch Orders (Read Only)", type="primary", use_container_width=True):
+        if not cin7_user or not cin7_key:
+            st.error("Enter Cin7 credentials in sidebar")
+        else:
+            with st.spinner("Fetching orders from Cin7..."):
+                orders = fetch_orders(cin7_user, cin7_key, since, until)
+            st.session_state.fetched_orders = orders
+            st.session_state.fetch_since = since_date
+            st.session_state.fetch_until = until_date
+            st.success(f"Fetched {len(orders)} orders")
     
-    # =========================================================================
-    # RESULTS
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # RESULTS (from session state)
+    # -------------------------------------------------------------------------
     orders = st.session_state.fetched_orders
-    matched = st.session_state.matched_orders
-    exceptions = st.session_state.exceptions
-    
     if orders is None:
+        st.caption("👆 Select a date range and click Fetch Orders")
         return
     
-    wholesale_orders = [o for o in orders if o.get('_segment') == 'Wholesale']
-    retail_orders = [o for o in orders if o.get('_segment') == 'Retail']
+    st.caption(f"🟢 {len(orders)} orders loaded from {st.session_state.fetch_since} to {st.session_state.fetch_until}")
     
-    st.caption(f"📦 **{len(orders)} orders loaded** from {st.session_state.fetch_since} to {st.session_state.fetch_until}")
+    # Filter
+    to_import, to_skip, to_review = filter_orders(orders, exclude_shopify, exclude_zero)
+    
+    # Segment splits
+    wholesale_import = [o for o in to_import if o.get('_segment') == 'Wholesale']
+    retail_import = [o for o in to_import if o.get('_segment') == 'Retail']
+    wholesale_skip = [o for o in to_skip if o.get('_segment') == 'Wholesale']
+    retail_skip = [o for o in to_skip if o.get('_segment') == 'Retail']
+    
+    # Revenue calcs
+    import_revenue = sum(o.get('total', 0) or 0 for o in to_import)
+    wholesale_revenue = sum(o.get('total', 0) or 0 for o in wholesale_import)
+    retail_revenue = sum(o.get('total', 0) or 0 for o in retail_import)
+    skip_revenue = sum(o.get('total', 0) or 0 for o in to_skip)
+    review_revenue = sum(o.get('total', 0) or 0 for o in to_review)
     
     st.divider()
     
-    # =========================================================================
+    # -------------------------------------------------------------------------
     # METRICS
-    # =========================================================================
-    st.subheader("📊 Results — Wholesale Orders")
+    # -------------------------------------------------------------------------
+    st.header("📊 Results — All Orders")
     
-    total_exceptions = sum(len(v) for v in exceptions.values())
-    matched_total = sum((m['order'].get('total') or 0) for m in matched)
-    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.metric("Wholesale Orders", len(wholesale_orders))
+        st.metric("Orders Fetched", len(orders))
     with col2:
-        st.metric("Ready to Push", len(matched), delta=f"${matched_total:,.0f}")
+        st.metric("Would Import", len(to_import), delta=f"${import_revenue:,.0f}")
     with col3:
-        st.metric("Exceptions", total_exceptions)
+        st.metric("Needs Review", len(to_review), delta=f"$0 orders")
     with col4:
-        st.metric("Total Revenue", f"${matched_total:,.0f}")
+        st.metric("Would Skip", len(to_skip), delta=f"${skip_revenue:,.0f}")
+    with col5:
+        st.metric("Total Revenue", f"${import_revenue + review_revenue:,.0f}")
+    
+    # Segment split
+    st.divider()
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("🏢 Wholesale")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Import", len(wholesale_import))
+        with c2:
+            st.metric("Revenue", f"${wholesale_revenue:,.0f}")
+        with c3:
+            st.metric("Review", len([o for o in to_review if o.get('_segment') == 'Wholesale']))
+        with c4:
+            st.metric("Skip", len(wholesale_skip))
+    
+    with col2:
+        st.subheader("🛍️ Retail")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Import", len(retail_import))
+        with c2:
+            st.metric("Revenue", f"${retail_revenue:,.0f}")
+        with c3:
+            st.metric("Review", len([o for o in to_review if o.get('_segment') == 'Retail']))
+        with c4:
+            st.metric("Skip", len(retail_skip))
     
     st.divider()
     
-    # =========================================================================
-    # READY TO PUSH (with checkboxes)
-    # =========================================================================
-    st.subheader(f"✅ Ready to Push ({len(matched)} orders)")
+    # -------------------------------------------------------------------------
+    # IMPORT TABLE
+    # -------------------------------------------------------------------------
+    st.subheader(f"✅ Would Import to HubSpot ({len(to_import)} orders)")
     
-    if matched:
-        # Select all / Deselect all buttons
-        col1, col2, col3 = st.columns([1, 1, 4])
-        with col1:
-            if st.button("Select All"):
-                st.session_state.selected_orders = set(range(len(matched)))
-                st.rerun()
-        with col2:
-            if st.button("Deselect All"):
-                st.session_state.selected_orders = set()
-                st.rerun()
-        
-        # Display orders with checkboxes
-        for i, item in enumerate(matched):
-            order = item['order']
-            match = item['match']
-            
-            order_ref = order.get('reference', '')
-            company = order.get('company') or order.get('billingCompany') or ''
-            total = order.get('total', 0) or 0
-            match_type = match.get('match_type', '')
-            
-            is_selected = i in st.session_state.selected_orders
-            
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                if st.checkbox("", value=is_selected, key=f"order_{i}", label_visibility="collapsed"):
-                    st.session_state.selected_orders.add(i)
-                else:
-                    st.session_state.selected_orders.discard(i)
-            with col2:
-                st.write(f"**{order_ref}** — {company} — ${total:,.2f} — *{match_type}*")
-        
-        st.divider()
-        
-        # Push button
-        selected_count = len(st.session_state.selected_orders)
-        selected_total = sum(
-            (matched[i]['order'].get('total') or 0) 
-            for i in st.session_state.selected_orders
-        )
-        
-        if selected_count > 0:
-            if st.button(
-                f"🚀 PUSH {selected_count} ORDERS TO HUBSPOT (${selected_total:,.0f})",
-                type="primary",
-                use_container_width=True
-            ):
-                success_count = 0
-                fail_count = 0
-                errors = []
-                
-                progress = st.progress(0)
-                status = st.empty()
-                
-                selected_list = sorted(st.session_state.selected_orders)
-                
-                for idx, i in enumerate(selected_list):
-                    item = matched[i]
-                    order = item['order']
-                    match = item['match']
-                    order_ref = order.get('reference', '')
-                    
-                    status.write(f"Pushing {order_ref}...")
-                    
-                    success, result = create_hubspot_deal(
-                        hubspot_key,
-                        order,
-                        contact_id=match.get('contact_id'),
-                        company_id=match.get('company_id')
-                    )
-                    
-                    if success:
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                        errors.append(f"{order_ref}: {result}")
-                    
-                    progress.progress((idx + 1) / len(selected_list))
-                
-                progress.empty()
-                status.empty()
-                
-                st.session_state.push_results = {
-                    'success': success_count,
-                    'failed': fail_count,
-                    'errors': errors
-                }
-                
-                if success_count > 0:
-                    st.success(f"✅ Pushed {success_count} orders to HubSpot!")
-                if fail_count > 0:
-                    st.error(f"❌ {fail_count} orders failed")
-                    for err in errors:
-                        st.write(f"  - {err}")
+    tab1, tab2, tab3 = st.tabs([f"All ({len(to_import)})", f"🏢 Wholesale ({len(wholesale_import)})", f"🛍️ Retail ({len(retail_import)})"])
+    
+    with tab1:
+        if to_import:
+            df = pd.DataFrame([order_to_summary(o) for o in to_import])
+            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
-            st.info("Select orders to push")
-    else:
-        st.info("No matched orders to push")
+            st.info("No orders to import")
+    
+    with tab2:
+        if wholesale_import:
+            df = pd.DataFrame([order_to_summary(o) for o in wholesale_import])
+            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
+        else:
+            st.info("No wholesale orders to import")
+    
+    with tab3:
+        if retail_import:
+            df = pd.DataFrame([order_to_summary(o) for o in retail_import])
+            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
+        else:
+            st.info("No retail orders to import")
+    
+    # What would be created
+    with st.expander("🔍 What would be created in HubSpot"):
+        st.markdown("""
+        For each imported order, we would create:
+        - **Deal**: Order total as Closed Won deal
+        - **Line Items**: Each product in the order
+        - **Associations**: Link to existing Contact & Company
+        
+        **Status Filter**: Only **Approved** and **Voided** orders are imported.
+        Draft, Pending, Cancelled, and other statuses are skipped.
+        """)
     
     st.divider()
     
-    # =========================================================================
-    # EXCEPTIONS SECTION
-    # =========================================================================
-    st.subheader("⚠️ Exceptions")
+    # -------------------------------------------------------------------------
+    # REVIEW TABLE
+    # -------------------------------------------------------------------------
+    if to_review:
+        st.subheader(f"⚠️ Needs Review ({len(to_review)} orders)")
+        st.warning("These $0.00 orders need manual review before import")
+        df_review = pd.DataFrame([order_to_summary(o) for o in to_review])
+        st.dataframe(df_review, use_container_width=True, hide_index=True, column_config=get_column_config())
+        
+        csv = df_review.to_csv(index=False)
+        st.download_button("📥 Download Review List", data=csv, file_name="cin7_review_orders.csv", mime="text/csv")
+        st.divider()
     
-    if total_exceptions == 0:
-        st.success("No exceptions!")
-    else:
-        # No Match - RED
-        if exceptions.get('no_match'):
-            with st.expander(f"🔴 No Match Found ({len(exceptions['no_match'])})"):
-                st.error("These orders could not be matched to any HubSpot contact or company.")
-                for item in exceptions['no_match']:
-                    order = item['order']
-                    st.write(f"**{order.get('reference')}** — {order.get('company', '')} — {order.get('email', '')} — {item['reason']}")
+    # -------------------------------------------------------------------------
+    # SKIP TABLE
+    # -------------------------------------------------------------------------
+    with st.expander(f"⏭️ Would Skip ({len(to_skip)} orders)"):
+        st.caption("Skipped due to: Retail segment, Shopify Retail source, non-importable status (Draft/Pending/Cancelled), or $0 filter")
+        if to_skip:
+            df_skip = pd.DataFrame([order_to_summary(o) for o in to_skip])
+            st.dataframe(df_skip, use_container_width=True, hide_index=True, column_config=get_column_config())
+        else:
+            st.info("No skipped orders")
+    
+    # -------------------------------------------------------------------------
+    # SOURCE BREAKDOWN
+    # -------------------------------------------------------------------------
+    with st.expander("📊 Source Breakdown"):
+        source_data = {}
+        for o in orders:
+            src = o.get('source', 'Unknown')
+            seg = o.get('_segment', 'Unknown')
+            key = (src, seg)
+            if key not in source_data:
+                source_data[key] = {'Source': src, 'Segment': seg, 'Count': 0, 'Revenue': 0}
+            source_data[key]['Count'] += 1
+            source_data[key]['Revenue'] += o.get('total', 0) or 0
         
-        # Ambiguous Match - ORANGE
-        if exceptions.get('ambiguous_match'):
-            with st.expander(f"🟠 Ambiguous Match ({len(exceptions['ambiguous_match'])})"):
-                st.warning("These orders matched multiple companies or scored below the threshold.")
-                for item in exceptions['ambiguous_match']:
-                    order = item['order']
-                    st.write(f"**{order.get('reference')}** — {order.get('company', '')} — {item['reason']}")
-        
-        # Generic Email - YELLOW
-        if exceptions.get('generic_email'):
-            with st.expander(f"🟡 Generic Email Only ({len(exceptions['generic_email'])})"):
-                st.warning("These orders only have gmail/yahoo/etc. emails with no company name.")
-                for item in exceptions['generic_email']:
-                    order = item['order']
-                    st.write(f"**{order.get('reference')}** — {order.get('email', '')} — {item['reason']}")
-        
-        # Missing Email - YELLOW
-        if exceptions.get('missing_email_cin7'):
-            with st.expander(f"🟡 Missing Email in Cin7 ({len(exceptions['missing_email_cin7'])})"):
-                st.warning("These orders have no email address in Cin7.")
-                for item in exceptions['missing_email_cin7']:
-                    order = item['order']
-                    st.write(f"**{order.get('reference')}** — {order.get('company', '')} — {item['reason']}")
-        
-        # Duplicate - BLUE
-        if exceptions.get('duplicate'):
-            with st.expander(f"🔵 Already in HubSpot ({len(exceptions['duplicate'])})"):
-                st.info("These orders already exist in HubSpot (skipped to prevent duplicates).")
-                for item in exceptions['duplicate']:
-                    order = item['order']
-                    st.write(f"**{order.get('reference')}** — {order.get('company', '')} — {item['reason']}")
-        
-        # Download exceptions
-        all_exceptions = []
-        for exc_type, items in exceptions.items():
-            for item in items:
-                order = item['order']
-                all_exceptions.append({
-                    'Type': exc_type,
-                    'Order #': order.get('reference', ''),
-                    'Company': order.get('company', ''),
-                    'Email': order.get('email', ''),
-                    'Total': order.get('total', 0),
-                    'Reason': item.get('reason', '')
-                })
-        
-        if all_exceptions:
-            df_exc = pd.DataFrame(all_exceptions)
-            csv = df_exc.to_csv(index=False)
-            st.download_button(
-                "📥 Download Exceptions CSV",
-                data=csv,
-                file_name=f"cin7connect_exceptions_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
+        df_source = pd.DataFrame(source_data.values())
+        if not df_source.empty:
+            df_source = df_source.sort_values('Count', ascending=False)
+            st.dataframe(
+                df_source, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    'Revenue': st.column_config.NumberColumn('Revenue', format='$%.2f')
+                }
             )
     
-    st.divider()
+    # -------------------------------------------------------------------------
+    # STATUS BREAKDOWN
+    # -------------------------------------------------------------------------
+    with st.expander("📋 Status Breakdown"):
+        status_data = {}
+        for o in orders:
+            status = o.get('stage') or o.get('status') or 'Unknown'
+            seg = o.get('_segment', 'Unknown')
+            key = (status, seg)
+            if key not in status_data:
+                status_data[key] = {'Status': status, 'Segment': seg, 'Count': 0, 'Revenue': 0}
+            status_data[key]['Count'] += 1
+            status_data[key]['Revenue'] += o.get('total', 0) or 0
+        
+        df_status = pd.DataFrame(status_data.values())
+        if not df_status.empty:
+            df_status = df_status.sort_values('Count', ascending=False)
+            st.dataframe(
+                df_status, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    'Revenue': st.column_config.NumberColumn('Revenue', format='$%.2f')
+                }
+            )
+            
+            st.caption("✅ **Importable statuses**: Approved, Voided")
+            st.caption("❌ **Skipped statuses**: Draft, Pending, Cancelled, and all others")
     
-    # =========================================================================
-    # RETAIL (collapsed)
-    # =========================================================================
-    with st.expander(f"▶ Retail Orders ({len(retail_orders)}) — click to expand"):
-        if retail_orders:
-            retail_data = [order_to_display(o) for o in retail_orders]
-            st.dataframe(pd.DataFrame(retail_data), use_container_width=True, hide_index=True)
-        else:
-            st.info("No retail orders")
-    
-    # Footer
     st.divider()
-    st.caption("🔄 **Cin7Connect** — Wholesale orders sync to HubSpot as Closed Won deals")
+    st.caption("🔄 **Cin7Connect Demo** — Read-only preview of what would sync to HubSpot")
 
 if __name__ == "__main__":
     main()
