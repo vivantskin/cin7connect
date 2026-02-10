@@ -399,7 +399,7 @@ def order_to_display(order: dict, match_result: dict = None) -> dict:
         'Order #': order.get('reference', ''),
         'Company': order.get('company') or order.get('billingCompany') or '',
         'Email': order.get('email') or order.get('memberEmail') or '',
-        'Total': f"${total:,.2f}",
+        'Total': total,
         'Date': (order.get('createdDate') or '')[:10],
         'Source': order.get('source', ''),
     }
