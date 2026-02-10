@@ -204,24 +204,62 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
 def order_to_summary(order: dict) -> dict:
     """Convert order to display format with raw numbers for proper sorting."""
     total = order.get('total', 0) or 0
+    
+    # Get customer name from multiple possible fields
+    customer = (
+        order.get('customerName') or 
+        order.get('contactName') or 
+        order.get('billingName') or
+        order.get('deliveryName') or
+        order.get('memberName') or
+        order.get('contact') or
+        ''
+    )
+    
+    # If still empty, try firstName + lastName
+    if not customer:
+        first = order.get('firstName') or order.get('billingFirstName') or ''
+        last = order.get('lastName') or order.get('billingLastName') or ''
+        customer = f"{first} {last}".strip()
+    
     return {
         'Order #': order.get('reference', ''),
         'Source': order.get('source', ''),
         'Segment': order.get('_segment', ''),
-        'Total': float(total),  # Raw number for sorting
+        'Total_Numeric': float(total),  # Hidden column for sorting
+        'Total': float(total),  # Display column
         'Company': order.get('company') or order.get('billingCompany') or '',
-        'Customer': order.get('customerName') or order.get('contactName') or '',
+        'Customer': customer,
         'Email': order.get('email') or order.get('memberEmail') or '',
         'Date': (order.get('createdDate') or '')[:10],
         'Status': order.get('stage') or order.get('status') or '',
     }
+
+def prepare_dataframe(orders: list, sort_by: str = 'Total_Numeric', ascending: bool = False) -> pd.DataFrame:
+    """Create DataFrame from orders, properly sorted by numeric Total."""
+    if not orders:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame([order_to_summary(o) for o in orders])
+    
+    # Ensure Total is numeric
+    df['Total_Numeric'] = pd.to_numeric(df['Total_Numeric'], errors='coerce').fillna(0)
+    df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
+    
+    # Sort by numeric value
+    df = df.sort_values(sort_by, ascending=ascending)
+    
+    # Drop the helper column
+    df = df.drop(columns=['Total_Numeric'])
+    
+    return df
 
 def get_column_config():
     """Column configuration for currency formatting."""
     return {
         'Total': st.column_config.NumberColumn(
             'Total',
-            format='$%.2f'
+            format='$ %.2f'
         )
     }
 
@@ -412,21 +450,21 @@ def main():
     
     with tab1:
         if to_import:
-            df = pd.DataFrame([order_to_summary(o) for o in to_import])
+            df = prepare_dataframe(to_import)
             st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
             st.info("No orders to import")
     
     with tab2:
         if wholesale_import:
-            df = pd.DataFrame([order_to_summary(o) for o in wholesale_import])
+            df = prepare_dataframe(wholesale_import)
             st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
             st.info("No wholesale orders to import")
     
     with tab3:
         if retail_import:
-            df = pd.DataFrame([order_to_summary(o) for o in retail_import])
+            df = prepare_dataframe(retail_import)
             st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
             st.info("No retail orders to import")
@@ -451,7 +489,7 @@ def main():
     if to_review:
         st.subheader(f"⚠️ Needs Review ({len(to_review)} orders)")
         st.warning("These $0.00 orders need manual review before import")
-        df_review = pd.DataFrame([order_to_summary(o) for o in to_review])
+        df_review = prepare_dataframe(to_review)
         st.dataframe(df_review, use_container_width=True, hide_index=True, column_config=get_column_config())
         
         csv = df_review.to_csv(index=False)
@@ -464,7 +502,7 @@ def main():
     with st.expander(f"⏭️ Would Skip ({len(to_skip)} orders)"):
         st.caption("Skipped due to: Retail segment, Shopify Retail source, non-importable status (Draft/Pending/Cancelled), or $0 filter")
         if to_skip:
-            df_skip = pd.DataFrame([order_to_summary(o) for o in to_skip])
+            df_skip = prepare_dataframe(to_skip)
             st.dataframe(df_skip, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
             st.info("No skipped orders")
