@@ -510,54 +510,54 @@ def main():
     st.divider()
     
     # -------------------------------------------------------------------------
-    # SECTION 2: NEEDS REVIEW (not pre-selected)
+    # SECTION 2: NEEDS REVIEW (not pre-selected, collapsed by default)
     # -------------------------------------------------------------------------
-    st.header(f"⚠️ Needs Review ({len(to_review)} orders)")
-    st.caption("These orders need manual review before import — check the box to include. Click column headers to sort.")
-    
-    if to_review:
-        # Select All / Deselect All buttons
-        col1, col2, col3 = st.columns([1, 1, 4])
-        with col1:
-            if st.button("Select All", key="select_all_review"):
-                st.session_state.selected_review = review_refs.copy()
-                st.rerun()
-        with col2:
-            if st.button("Deselect All", key="deselect_all_review"):
-                st.session_state.selected_review = set()
-                st.rerun()
+    with st.expander(f"⚠️ Needs Review ({len(to_review)} orders) — Click to expand"):
+        st.caption("These orders need manual review before import — check the box to include. Click column headers to sort.")
         
-        # Create dataframe with Select column and Reason
-        df_review = prepare_dataframe(to_review, include_reason=True)
-        df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
-        
-        # Editable dataframe
-        edited_review = st.data_editor(
-            df_review,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Select': st.column_config.CheckboxColumn('Select', default=False),
-                'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-                'Reason': st.column_config.TextColumn('Reason', width='medium')
-            },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status', 'Reason'],
-            key="review_editor"
-        )
-        
-        # Update selections based on edits
-        st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
-        
-        # Show count of selected
-        selected_review_count = len(st.session_state.selected_review & review_refs)
-        selected_review_total = sum(
-            (o.get('total', 0) or 0) 
-            for o in to_review 
-            if o.get('reference') in st.session_state.selected_review
-        )
-        st.caption(f"✓ {selected_review_count} of {len(to_review)} selected (${selected_review_total:,.2f})")
-    else:
-        st.info("No orders need review")
+        if to_review:
+            # Select All / Deselect All buttons
+            col1, col2, col3 = st.columns([1, 1, 4])
+            with col1:
+                if st.button("Select All", key="select_all_review"):
+                    st.session_state.selected_review = review_refs.copy()
+                    st.rerun()
+            with col2:
+                if st.button("Deselect All", key="deselect_all_review"):
+                    st.session_state.selected_review = set()
+                    st.rerun()
+            
+            # Create dataframe with Select column and Reason
+            df_review = prepare_dataframe(to_review, include_reason=True)
+            df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
+            
+            # Editable dataframe
+            edited_review = st.data_editor(
+                df_review,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Select': st.column_config.CheckboxColumn('Select', default=False),
+                    'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
+                    'Reason': st.column_config.TextColumn('Reason', width='medium')
+                },
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status', 'Reason'],
+                key="review_editor"
+            )
+            
+            # Update selections based on edits
+            st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
+            
+            # Show count of selected
+            selected_review_count = len(st.session_state.selected_review & review_refs)
+            selected_review_total = sum(
+                (o.get('total', 0) or 0) 
+                for o in to_review 
+                if o.get('reference') in st.session_state.selected_review
+            )
+            st.caption(f"✓ {selected_review_count} of {len(to_review)} selected (${selected_review_total:,.2f})")
+        else:
+            st.info("No orders need review")
     
     st.divider()
     
