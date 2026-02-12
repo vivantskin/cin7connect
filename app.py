@@ -166,7 +166,7 @@ def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
     
     Filter Logic (in order):
     1. Retail segment → Skip
-    2. Company contains "vivant" → Skip (internal/test)
+    2. Company or email contains "vivant" → Review (internal/test)
     3. Shopify Retail source (if checkbox) → Skip
     4. Status not Approved/Dispatched/Voided → Skip
     5. No email + Dispatched → Review (likely employee)
@@ -192,11 +192,11 @@ def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
             to_skip.append(o)
             continue
         
-        # 2. Skip internal/test orders (Vivant in company OR email)
+        # 2. Review internal/test orders (Vivant in company name or email)
         email_address = (o.get('email') or o.get('memberEmail') or '').lower()
         if 'vivant' in company or 'vivant' in email_address:
-            o['_skip_reason'] = 'Internal (Vivant)'
-            to_skip.append(o)
+            o['_review_reason'] = 'Internal (Vivant in company or email)'
+            to_review.append(o)
             continue
         
         # 3. Skip excluded sources
