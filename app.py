@@ -193,17 +193,20 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
             continue
         
         # Handle $0 orders
-        # Import if $0 but has company name and is dispatched
+        # Import if $0 but has company name, email, and is dispatched
+        # No email = likely employee order, send to review
         if total == 0:
             has_company = bool(company.strip())
+            has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
             is_dispatched = status == 'dispatched'
             
-            if has_company and is_dispatched:
-                # $0 with company + dispatched = import
+            if has_company and has_email and is_dispatched:
+                # $0 with company + email + dispatched = import
                 to_import.append(o)
             elif exclude_zero:
                 to_skip.append(o)
             else:
+                # No email or not dispatched = review (likely employee order)
                 to_review.append(o)
             continue
         
