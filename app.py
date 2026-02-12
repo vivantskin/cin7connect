@@ -193,8 +193,15 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
             continue
         
         # Handle $0 orders
+        # Import if $0 but has company name and is dispatched
         if total == 0:
-            if exclude_zero:
+            has_company = bool(company.strip())
+            is_dispatched = status == 'dispatched'
+            
+            if has_company and is_dispatched:
+                # $0 with company + dispatched = import
+                to_import.append(o)
+            elif exclude_zero:
                 to_skip.append(o)
             else:
                 to_review.append(o)
