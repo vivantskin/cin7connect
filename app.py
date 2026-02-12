@@ -41,6 +41,10 @@ if 'fetch_since' not in st.session_state:
     st.session_state.fetch_since = None
 if 'fetch_until' not in st.session_state:
     st.session_state.fetch_until = None
+if 'selected_import' not in st.session_state:
+    st.session_state.selected_import = set()
+if 'selected_review' not in st.session_state:
+    st.session_state.selected_review = set()
 
 # =============================================================================
 # CONFIG FILE HANDLING
@@ -156,14 +160,23 @@ def test_hubspot(api_key: str) -> tuple:
 # =============================================================================
 # FILTER ORDERS
 # =============================================================================
-def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tuple:
+def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
     """
-    Filter orders into: to_import, to_skip, to_review
-    Now includes status filter: only Approved and Voided are importable
+    Filter orders into: to_import, to_review, to_skip
+    
+    Filter Logic (in order):
+    1. Retail segment → Skip
+    2. Company contains "vivant" → Skip (internal/test)
+    3. Shopify Retail source (if checkbox) → Skip
+    4. Status not Approved/Dispatched/Voided → Skip
+    5. No email + Dispatched → Review (likely employee)
+    6. $0 value + Has email → Import (client sample/promo)
+    7. $0 value + No email → Review (likely employee)
+    8. Has value + Has email → Import
     """
     to_import = []
-    to_skip = []
     to_review = []
+    to_skip = []
     
     for o in orders:
         source = (o.get('source') or '').lower()
@@ -173,47 +186,56 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
         company = (o.get('company') or o.get('billingCompany') or '').lower()
         has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
         
-        # Skip retail
+        # 1. Skip retail
         if segment == 'Retail':
+            o['_skip_reason'] = 'Retail segment'
             to_skip.append(o)
             continue
         
-        # Skip internal/test orders (Vivant)
+        # 2. Skip internal/test orders (Vivant)
         if 'vivant' in company:
+            o['_skip_reason'] = 'Internal (Vivant)'
             to_skip.append(o)
             continue
         
-        # Skip excluded sources
+        # 3. Skip excluded sources
         if exclude_shopify and 'shopify retail' in source:
+            o['_skip_reason'] = 'Shopify Retail excluded'
             to_skip.append(o)
             continue
         
-        # Check status - only import Approved, Dispatched, and Voided
+        # 4. Check status - only import Approved, Dispatched, and Voided
         if status not in IMPORTABLE_STATUSES:
+            o['_skip_reason'] = f'Status: {status}'
             to_skip.append(o)
             continue
         
-        # No email + dispatched = likely employee order, send to review
+        # 5. No email + Dispatched = likely employee order, send to review
         if not has_email and status == 'dispatched':
+            o['_review_reason'] = 'No email (likely employee)'
             to_review.append(o)
             continue
         
-        # Handle $0 orders
+        # 6 & 7. Handle $0 orders
         if total == 0:
-            if exclude_zero:
-                to_skip.append(o)
+            if has_email:
+                # $0 + email = client order (sample/promo), import it
+                to_import.append(o)
             else:
+                # $0 + no email = likely employee, review
+                o['_review_reason'] = '$0 + No email (likely employee)'
                 to_review.append(o)
             continue
         
+        # 8. Has value + has email = import
         to_import.append(o)
     
-    return to_import, to_skip, to_review
+    return to_import, to_review, to_skip
 
 # =============================================================================
 # DISPLAY HELPERS
 # =============================================================================
-def order_to_summary(order: dict) -> dict:
+def order_to_summary(order: dict, include_reason: bool = False) -> dict:
     """Convert order to display format with raw numbers for proper sorting."""
     total = order.get('total', 0) or 0
     
@@ -234,7 +256,7 @@ def order_to_summary(order: dict) -> dict:
         last = order.get('lastName') or order.get('billingLastName') or ''
         customer = f"{first} {last}".strip()
     
-    return {
+    result = {
         'Order #': order.get('reference', ''),
         'Source': order.get('source', ''),
         'Segment': order.get('_segment', ''),
@@ -246,20 +268,25 @@ def order_to_summary(order: dict) -> dict:
         'Date': (order.get('createdDate') or '')[:10],
         'Status': order.get('stage') or order.get('status') or '',
     }
+    
+    if include_reason:
+        result['Reason'] = order.get('_review_reason') or order.get('_skip_reason') or ''
+    
+    return result
 
-def prepare_dataframe(orders: list, sort_by: str = 'Total_Numeric', ascending: bool = False) -> pd.DataFrame:
+def prepare_dataframe(orders: list, include_reason: bool = False) -> pd.DataFrame:
     """Create DataFrame from orders, properly sorted by numeric Total."""
     if not orders:
         return pd.DataFrame()
     
-    df = pd.DataFrame([order_to_summary(o) for o in orders])
+    df = pd.DataFrame([order_to_summary(o, include_reason) for o in orders])
     
     # Ensure Total is numeric
     df['Total_Numeric'] = pd.to_numeric(df['Total_Numeric'], errors='coerce').fillna(0)
     df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
     
-    # Sort by numeric value
-    df = df.sort_values(sort_by, ascending=ascending)
+    # Sort by numeric value (descending)
+    df = df.sort_values('Total_Numeric', ascending=False)
     
     # Drop the helper column
     df = df.drop(columns=['Total_Numeric'])
@@ -333,7 +360,6 @@ def main():
         # Filters
         st.header("⚙️ Filters")
         exclude_shopify = st.checkbox("Exclude 'Shopify Retail'", value=True)
-        exclude_zero = st.checkbox("Exclude $0.00 orders", value=False, help="$0 orders go to 'Needs Review' if unchecked")
         
         st.divider()
         
@@ -377,6 +403,9 @@ def main():
             st.session_state.fetched_orders = orders
             st.session_state.fetch_since = since_date
             st.session_state.fetch_until = until_date
+            # Reset selections
+            st.session_state.selected_import = set()
+            st.session_state.selected_review = set()
             st.success(f"Fetched {len(orders)} orders")
     
     # -------------------------------------------------------------------------
@@ -389,144 +418,207 @@ def main():
     
     st.caption(f"🟢 {len(orders)} orders loaded (dispatched between {st.session_state.fetch_since} and {st.session_state.fetch_until})")
     
-    # Filter
-    to_import, to_skip, to_review = filter_orders(orders, exclude_shopify, exclude_zero)
+    # Filter orders
+    to_import, to_review, to_skip = filter_orders(orders, exclude_shopify)
     
-    # Segment splits
-    wholesale_import = [o for o in to_import if o.get('_segment') == 'Wholesale']
-    retail_import = [o for o in to_import if o.get('_segment') == 'Retail']
-    wholesale_skip = [o for o in to_skip if o.get('_segment') == 'Wholesale']
-    retail_skip = [o for o in to_skip if o.get('_segment') == 'Retail']
+    # Separate retail from other skipped
+    retail_orders = [o for o in to_skip if o.get('_segment') == 'Retail']
+    other_skipped = [o for o in to_skip if o.get('_segment') != 'Retail']
     
-    # Revenue calcs
+    # Revenue calculations
     import_revenue = sum(o.get('total', 0) or 0 for o in to_import)
-    wholesale_revenue = sum(o.get('total', 0) or 0 for o in wholesale_import)
-    retail_revenue = sum(o.get('total', 0) or 0 for o in retail_import)
-    skip_revenue = sum(o.get('total', 0) or 0 for o in to_skip)
     review_revenue = sum(o.get('total', 0) or 0 for o in to_review)
+    retail_revenue = sum(o.get('total', 0) or 0 for o in retail_orders)
+    
+    # Initialize selections (import orders pre-selected, review orders not)
+    import_refs = {o.get('reference') for o in to_import}
+    review_refs = {o.get('reference') for o in to_review}
+    
+    # If selections are empty, pre-select all import orders
+    if not st.session_state.selected_import and to_import:
+        st.session_state.selected_import = import_refs.copy()
     
     st.divider()
     
     # -------------------------------------------------------------------------
-    # METRICS
+    # METRICS SUMMARY
     # -------------------------------------------------------------------------
-    st.header("📊 Results — All Orders")
+    st.header("📊 Summary")
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Orders Fetched", len(orders))
+        st.metric("Ready to Import", len(to_import), delta=f"${import_revenue:,.0f}")
     with col2:
-        st.metric("Would Import", len(to_import), delta=f"${import_revenue:,.0f}")
+        st.metric("Needs Review", len(to_review), delta=f"${review_revenue:,.0f}")
     with col3:
-        st.metric("Needs Review", len(to_review), delta=f"$0 orders")
+        st.metric("Retail (view only)", len(retail_orders), delta=f"${retail_revenue:,.0f}")
     with col4:
-        st.metric("Would Skip", len(to_skip), delta=f"${skip_revenue:,.0f}")
-    with col5:
-        st.metric("Total Revenue", f"${import_revenue + review_revenue:,.0f}")
-    
-    # Segment split
-    st.divider()
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("🏢 Wholesale")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("Import", len(wholesale_import))
-        with c2:
-            st.metric("Revenue", f"${wholesale_revenue:,.0f}")
-        with c3:
-            st.metric("Review", len([o for o in to_review if o.get('_segment') == 'Wholesale']))
-        with c4:
-            st.metric("Skip", len(wholesale_skip))
-    
-    with col2:
-        st.subheader("🛍️ Retail")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("Import", len(retail_import))
-        with c2:
-            st.metric("Revenue", f"${retail_revenue:,.0f}")
-        with c3:
-            st.metric("Review", len([o for o in to_review if o.get('_segment') == 'Retail']))
-        with c4:
-            st.metric("Skip", len(retail_skip))
+        st.metric("Skipped", len(other_skipped))
     
     st.divider()
     
     # -------------------------------------------------------------------------
-    # IMPORT TABLE
+    # SECTION 1: READY TO IMPORT (pre-selected)
     # -------------------------------------------------------------------------
-    st.subheader(f"✅ Would Import to HubSpot ({len(to_import)} orders)")
+    st.header(f"✅ Ready to Import ({len(to_import)} orders)")
+    st.caption("These orders passed all filters and are pre-selected for import")
     
-    tab1, tab2, tab3 = st.tabs([f"All ({len(to_import)})", f"🏢 Wholesale ({len(wholesale_import)})", f"🛍️ Retail ({len(retail_import)})"])
-    
-    with tab1:
-        if to_import:
-            df = prepare_dataframe(to_import)
-            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
-        else:
-            st.info("No orders to import")
-    
-    with tab2:
-        if wholesale_import:
-            df = prepare_dataframe(wholesale_import)
-            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
-        else:
-            st.info("No wholesale orders to import")
-    
-    with tab3:
-        if retail_import:
-            df = prepare_dataframe(retail_import)
-            st.dataframe(df, use_container_width=True, hide_index=True, column_config=get_column_config())
-        else:
-            st.info("No retail orders to import")
-    
-    # What would be created
-    with st.expander("🔍 What would be created in HubSpot"):
-        st.markdown("""
-        For each imported order, we would create:
-        - **Deal**: Order total as Closed Won deal
-        - **Line Items**: Each product in the order
-        - **Associations**: Link to existing Contact & Company
+    if to_import:
+        # Select All / Deselect All buttons
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            if st.button("Select All", key="select_all_import"):
+                st.session_state.selected_import = import_refs.copy()
+                st.rerun()
+        with col2:
+            if st.button("Deselect All", key="deselect_all_import"):
+                st.session_state.selected_import = set()
+                st.rerun()
         
-        **Status Filter**: Only **Approved** and **Voided** orders are imported.
-        Draft, Pending, Cancelled, and other statuses are skipped.
-        """)
+        # Display orders with checkboxes
+        df_import = prepare_dataframe(to_import)
+        
+        for idx, row in df_import.iterrows():
+            ref = row['Order #']
+            is_selected = ref in st.session_state.selected_import
+            
+            col1, col2 = st.columns([0.05, 0.95])
+            with col1:
+                if st.checkbox("", value=is_selected, key=f"import_{ref}", label_visibility="collapsed"):
+                    st.session_state.selected_import.add(ref)
+                else:
+                    st.session_state.selected_import.discard(ref)
+            with col2:
+                total = row['Total']
+                company = row['Company']
+                email = row['Email']
+                status = row['Status']
+                st.markdown(f"**{ref}** — {company} — ${total:,.2f} — {email} — *{status}*")
+        
+        # Show count of selected
+        selected_import_count = len(st.session_state.selected_import & import_refs)
+        selected_import_total = sum(
+            (o.get('total', 0) or 0) 
+            for o in to_import 
+            if o.get('reference') in st.session_state.selected_import
+        )
+        st.caption(f"✓ {selected_import_count} of {len(to_import)} selected (${selected_import_total:,.2f})")
+    else:
+        st.info("No orders ready to import")
     
     st.divider()
     
     # -------------------------------------------------------------------------
-    # REVIEW TABLE
+    # SECTION 2: NEEDS REVIEW (not pre-selected)
     # -------------------------------------------------------------------------
+    st.header(f"⚠️ Needs Review ({len(to_review)} orders)")
+    st.caption("These orders need manual review before import — check the box to include")
+    
     if to_review:
-        st.subheader(f"⚠️ Needs Review ({len(to_review)} orders)")
-        st.warning("These $0.00 orders need manual review before import")
-        df_review = prepare_dataframe(to_review)
-        st.dataframe(df_review, use_container_width=True, hide_index=True, column_config=get_column_config())
+        # Select All / Deselect All buttons
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            if st.button("Select All", key="select_all_review"):
+                st.session_state.selected_review = review_refs.copy()
+                st.rerun()
+        with col2:
+            if st.button("Deselect All", key="deselect_all_review"):
+                st.session_state.selected_review = set()
+                st.rerun()
         
-        csv = df_review.to_csv(index=False)
-        st.download_button("📥 Download Review List", data=csv, file_name="cin7_review_orders.csv", mime="text/csv")
-        st.divider()
+        # Display orders with checkboxes and reason
+        df_review = prepare_dataframe(to_review, include_reason=True)
+        
+        for idx, row in df_review.iterrows():
+            ref = row['Order #']
+            is_selected = ref in st.session_state.selected_review
+            
+            col1, col2 = st.columns([0.05, 0.95])
+            with col1:
+                if st.checkbox("", value=is_selected, key=f"review_{ref}", label_visibility="collapsed"):
+                    st.session_state.selected_review.add(ref)
+                else:
+                    st.session_state.selected_review.discard(ref)
+            with col2:
+                total = row['Total']
+                company = row['Company']
+                reason = row['Reason']
+                st.markdown(f"**{ref}** — {company} — ${total:,.2f} — 🔶 *{reason}*")
+        
+        # Show count of selected
+        selected_review_count = len(st.session_state.selected_review & review_refs)
+        selected_review_total = sum(
+            (o.get('total', 0) or 0) 
+            for o in to_review 
+            if o.get('reference') in st.session_state.selected_review
+        )
+        st.caption(f"✓ {selected_review_count} of {len(to_review)} selected (${selected_review_total:,.2f})")
+    else:
+        st.info("No orders need review")
+    
+    st.divider()
     
     # -------------------------------------------------------------------------
-    # SKIP TABLE
+    # PUSH BUTTON
     # -------------------------------------------------------------------------
-    with st.expander(f"⏭️ Would Skip ({len(to_skip)} orders)"):
-        st.caption("Skipped due to: Retail segment, Shopify Retail source, non-importable status (Draft/Pending/Cancelled), or $0 filter")
-        if to_skip:
-            df_skip = prepare_dataframe(to_skip)
+    all_selected = (st.session_state.selected_import & import_refs) | (st.session_state.selected_review & review_refs)
+    total_selected = len(all_selected)
+    total_selected_revenue = sum(
+        (o.get('total', 0) or 0) 
+        for o in to_import + to_review 
+        if o.get('reference') in all_selected
+    )
+    
+    st.header("🚀 Push to HubSpot")
+    
+    if total_selected > 0:
+        st.success(f"**{total_selected} orders selected** — Total: ${total_selected_revenue:,.2f}")
+        
+        # Confirmation checkbox
+        confirm = st.checkbox(f"I confirm I want to push {total_selected} orders to HubSpot", key="confirm_push")
+        
+        if st.button(
+            f"🚀 PUSH {total_selected} ORDERS TO HUBSPOT (${total_selected_revenue:,.0f})",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirm
+        ):
+            st.warning("🎭 **DEMO MODE** — No data was written. In production, this would create deals in HubSpot.")
+            st.balloons()
+    else:
+        st.warning("No orders selected. Check orders above to include them in the push.")
+    
+    st.divider()
+    
+    # -------------------------------------------------------------------------
+    # SECTION 3: RETAIL (collapsed, view only)
+    # -------------------------------------------------------------------------
+    with st.expander(f"🛍️ Retail Orders ({len(retail_orders)}) — View Only"):
+        st.caption("Retail orders are shown for reference only and cannot be imported")
+        if retail_orders:
+            df_retail = prepare_dataframe(retail_orders)
+            st.dataframe(df_retail, use_container_width=True, hide_index=True, column_config=get_column_config())
+        else:
+            st.info("No retail orders")
+    
+    # -------------------------------------------------------------------------
+    # SECTION 4: SKIPPED (collapsed, view only)
+    # -------------------------------------------------------------------------
+    with st.expander(f"⏭️ Skipped Orders ({len(other_skipped)}) — View Only"):
+        st.caption("These orders were skipped due to filters (internal orders, wrong status, etc.)")
+        if other_skipped:
+            df_skip = prepare_dataframe(other_skipped, include_reason=True)
             st.dataframe(df_skip, use_container_width=True, hide_index=True, column_config=get_column_config())
         else:
             st.info("No skipped orders")
     
     # -------------------------------------------------------------------------
-    # SOURCE BREAKDOWN
+    # STATUS & SOURCE BREAKDOWN
     # -------------------------------------------------------------------------
     with st.expander("📊 Source Breakdown"):
         source_data = {}
         for o in orders:
-            src = o.get('source', 'Unknown')
+            src = o.get('source') or 'Unknown'
             seg = o.get('_segment', 'Unknown')
             key = (src, seg)
             if key not in source_data:
@@ -542,13 +634,10 @@ def main():
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    'Revenue': st.column_config.NumberColumn('Revenue', format='$%.2f')
+                    'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
                 }
             )
     
-    # -------------------------------------------------------------------------
-    # STATUS BREAKDOWN
-    # -------------------------------------------------------------------------
     with st.expander("📋 Status Breakdown"):
         status_data = {}
         for o in orders:
@@ -568,12 +657,31 @@ def main():
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    'Revenue': st.column_config.NumberColumn('Revenue', format='$%.2f')
+                    'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
                 }
             )
             
-            st.caption("✅ **Importable statuses**: Approved, Voided")
-            st.caption("❌ **Skipped statuses**: Draft, Pending, Cancelled, and all others")
+            st.caption("✅ **Importable statuses**: Approved, Dispatched, Voided")
+            st.caption("❌ **Skipped statuses**: Draft, Pending, New, and all others")
+    
+    # -------------------------------------------------------------------------
+    # FILTER LOGIC REFERENCE
+    # -------------------------------------------------------------------------
+    with st.expander("📖 Filter Logic Reference"):
+        st.markdown("""
+        **Orders are processed in this order:**
+        
+        | Step | Condition | Result |
+        |------|-----------|--------|
+        | 1 | Retail segment | ❌ Skip |
+        | 2 | Company contains "vivant" | ❌ Skip (internal) |
+        | 3 | Shopify Retail source | ❌ Skip (if enabled) |
+        | 4 | Status not Approved/Dispatched/Voided | ❌ Skip |
+        | 5 | No email + Dispatched | ⚠️ Review (likely employee) |
+        | 6 | $0 value + Has email | ✅ Import (client sample) |
+        | 7 | $0 value + No email | ⚠️ Review (likely employee) |
+        | 8 | Has value + Has email | ✅ Import |
+        """)
     
     st.divider()
     st.caption("🔄 **Cin7Connect Demo** — Read-only preview of what would sync to HubSpot")
