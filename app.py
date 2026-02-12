@@ -171,6 +171,7 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
         segment = o.get('_segment', 'Retail')
         status = (o.get('stage') or o.get('status') or '').lower()
         company = (o.get('company') or o.get('billingCompany') or '').lower()
+        has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
         
         # Skip retail
         if segment == 'Retail':
@@ -192,21 +193,16 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
             to_skip.append(o)
             continue
         
+        # No email + dispatched = likely employee order, send to review
+        if not has_email and status == 'dispatched':
+            to_review.append(o)
+            continue
+        
         # Handle $0 orders
-        # Import if $0 but has company name, email, and is dispatched
-        # No email = likely employee order, send to review
         if total == 0:
-            has_company = bool(company.strip())
-            has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
-            is_dispatched = status == 'dispatched'
-            
-            if has_company and has_email and is_dispatched:
-                # $0 with company + email + dispatched = import
-                to_import.append(o)
-            elif exclude_zero:
+            if exclude_zero:
                 to_skip.append(o)
             else:
-                # No email or not dispatched = review (likely employee order)
                 to_review.append(o)
             continue
         
