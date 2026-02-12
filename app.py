@@ -192,8 +192,9 @@ def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
             to_skip.append(o)
             continue
         
-        # 2. Skip internal/test orders (Vivant)
-        if 'vivant' in company:
+        # 2. Skip internal/test orders (Vivant in company OR email)
+        email_address = (o.get('email') or o.get('memberEmail') or '').lower()
+        if 'vivant' in company or 'vivant' in email_address:
             o['_skip_reason'] = 'Internal (Vivant)'
             to_skip.append(o)
             continue
