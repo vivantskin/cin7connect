@@ -461,7 +461,7 @@ def main():
     # SECTION 1: READY TO IMPORT (pre-selected)
     # -------------------------------------------------------------------------
     st.header(f"✅ Ready to Import ({len(to_import)} orders)")
-    st.caption("These orders passed all filters and are pre-selected for import")
+    st.caption("These orders passed all filters and are pre-selected for import. Click column headers to sort.")
     
     if to_import:
         # Select All / Deselect All buttons
@@ -475,25 +475,25 @@ def main():
                 st.session_state.selected_import = set()
                 st.rerun()
         
-        # Display orders with checkboxes
+        # Create dataframe with Select column
         df_import = prepare_dataframe(to_import)
+        df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
         
-        for idx, row in df_import.iterrows():
-            ref = row['Order #']
-            is_selected = ref in st.session_state.selected_import
-            
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                if st.checkbox("", value=is_selected, key=f"import_{ref}", label_visibility="collapsed"):
-                    st.session_state.selected_import.add(ref)
-                else:
-                    st.session_state.selected_import.discard(ref)
-            with col2:
-                total = row['Total']
-                company = row['Company']
-                email = row['Email']
-                status = row['Status']
-                st.markdown(f"**{ref}** — {company} — ${total:,.2f} — {email} — *{status}*")
+        # Editable dataframe
+        edited_import = st.data_editor(
+            df_import,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'Select': st.column_config.CheckboxColumn('Select', default=True),
+                'Total': st.column_config.NumberColumn('Total', format='$ %.2f')
+            },
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status'],
+            key="import_editor"
+        )
+        
+        # Update selections based on edits
+        st.session_state.selected_import = set(edited_import[edited_import['Select']]['Order #'].tolist())
         
         # Show count of selected
         selected_import_count = len(st.session_state.selected_import & import_refs)
@@ -512,7 +512,7 @@ def main():
     # SECTION 2: NEEDS REVIEW (not pre-selected)
     # -------------------------------------------------------------------------
     st.header(f"⚠️ Needs Review ({len(to_review)} orders)")
-    st.caption("These orders need manual review before import — check the box to include")
+    st.caption("These orders need manual review before import — check the box to include. Click column headers to sort.")
     
     if to_review:
         # Select All / Deselect All buttons
@@ -526,24 +526,26 @@ def main():
                 st.session_state.selected_review = set()
                 st.rerun()
         
-        # Display orders with checkboxes and reason
+        # Create dataframe with Select column and Reason
         df_review = prepare_dataframe(to_review, include_reason=True)
+        df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
         
-        for idx, row in df_review.iterrows():
-            ref = row['Order #']
-            is_selected = ref in st.session_state.selected_review
-            
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                if st.checkbox("", value=is_selected, key=f"review_{ref}", label_visibility="collapsed"):
-                    st.session_state.selected_review.add(ref)
-                else:
-                    st.session_state.selected_review.discard(ref)
-            with col2:
-                total = row['Total']
-                company = row['Company']
-                reason = row['Reason']
-                st.markdown(f"**{ref}** — {company} — ${total:,.2f} — 🔶 *{reason}*")
+        # Editable dataframe
+        edited_review = st.data_editor(
+            df_review,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'Select': st.column_config.CheckboxColumn('Select', default=False),
+                'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
+                'Reason': st.column_config.TextColumn('Reason', width='medium')
+            },
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status', 'Reason'],
+            key="review_editor"
+        )
+        
+        # Update selections based on edits
+        st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
         
         # Show count of selected
         selected_review_count = len(st.session_state.selected_review & review_refs)
