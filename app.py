@@ -170,9 +170,15 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
         total = o.get('total', 0) or 0
         segment = o.get('_segment', 'Retail')
         status = (o.get('stage') or o.get('status') or '').lower()
+        company = (o.get('company') or o.get('billingCompany') or '').lower()
         
         # Skip retail
         if segment == 'Retail':
+            to_skip.append(o)
+            continue
+        
+        # Skip internal/test orders (Vivant)
+        if 'vivant' in company:
             to_skip.append(o)
             continue
         
@@ -181,7 +187,7 @@ def filter_orders(orders: list, exclude_shopify: bool, exclude_zero: bool) -> tu
             to_skip.append(o)
             continue
         
-        # Check status - only import Approved and Voided
+        # Check status - only import Approved, Dispatched, and Voided
         if status not in IMPORTABLE_STATUSES:
             to_skip.append(o)
             continue
